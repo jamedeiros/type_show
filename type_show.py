@@ -19,6 +19,7 @@ class MyCurses(object):
 
 	#B:TYPE - 1#
 	def write_count(self, initial=1):
+		self.count_win.clear()
 		for i in range(self.height):
 			self.count_win.addstr(i, 0, '{:2d}'.format(initial + i))
 		self.count_win.refresh()
@@ -56,11 +57,12 @@ class DelayTyping(object):
 	COLOR_NORMAL    = 1
 	COLOR_HIGHLIGHT = 2
 	
-	def __init__(self, filename, delay=None, begin=None, end=None):
+	def __init__(self, filename, delay=None, areas=None):
 		self.filename = filename
 		self.delay = delay
-		self.begin = begin
-		self.end = end
+		self.areas = list()
+
+		self.areas_processes(areas)
 
 		self.curses = MyCurses()
 		self.curses.set_color_pair(
@@ -74,12 +76,37 @@ class DelayTyping(object):
 			background = curses.COLOR_CYAN
 		)
 
-	def delayed_write(self, line, n):
+	def __calculate_adjusts(self, begin):
+		adjust = 0
+		for area in self.areas:
+			if len(area) == 2:
+				if begin > area[0]:
+					adjust += 1
+			else:
+				if begin > area[1]:
+					adjust += area[1] - area[0]
+		return adjust
+
+	def areas_processes(self, areas):
+		aux = list()
+
+		self.areas = list()
+
+		for area in areas[::-1]:
+			adjust = self.__calculate_adjusts(area[0])
+			if len(area) == 1:
+				self.areas.append([area[0], adjust])
+			else:
+				self.areas.append([area[0], area[1], adjust])
+
+		self.areas = self.areas[::-1]
+			
+	def delayed_write(self, line, n, adjust=0):
 		locate = False
 		if len(line) == 0:
 				self.curses.write(
 					text = '',
-					x = n,
+					x = n-adjust,
 					y = 0, 
 					color = self.COLOR_HIGHLIGHT, 
 					with_scroll = True
@@ -92,7 +119,7 @@ class DelayTyping(object):
 				if not locate:
 					self.curses.write(
 						text = character,
-						x = n,
+						x = n-adjust,
 						y = 0, 
 						color = self.COLOR_HIGHLIGHT, 
 						with_scroll = True
@@ -107,31 +134,55 @@ class DelayTyping(object):
 				if self.delay is not None:
 					sleep(self.delay)
 
-	def view_fixed_content(self, lines):
+	def view_fixed_content(self):
+		hided_lines = set()
+		for area in self.areas:
+			if len(area) == 2:
+				hided_lines.update([area[0]])
+			else:
+				hided_lines.update(range(area[0], area[1] + 1))
+
 		printed = 0
 
-		for n, line in enumerate(lines, 1):
+		for n, line in enumerate(self.lines, 1):
 			if printed >= self.curses.height - 1:
 				break
 
-			if self.begin <= n <= self.end:
+			if n in hided_lines:
 				continue
 
 			printed += 1
 			self.curses.write(text=line, color=self.COLOR_NORMAL)
 
-	def view_file(self):
-		lines = None
-
+	def  process_file(self):
+		self.lines = list()
 		with open(self.filename, 'r') as fd:
-			lines = fd.readlines()
+			self.lines = fd.readlines()
+
+	def view_file(self):
+		self.process_file()
 
 		self.curses.write_count()
-		self.view_fixed_content(lines)
-		self.curses.pause()
+		self.view_fixed_content()
 
-		for n in range(self.begin - 1, self.end):
-			self.delayed_write(lines[n][:-1], n)
+		for area in self.areas:
+			self.curses.pause()
+			begin = None
+			end = None
+			adjust = 0
+
+			if len(area) == 2:
+				begin = end = area[0]
+				adjust = area[1]
+			else:
+				begin = area[0]
+				end = area[1]
+				adjust = area[2]
+
+			for n in range(begin - 1, end):
+				self.delayed_write(self.lines[n][:-1], n, adjust)
+
+		curses.beep()
 
 	def show(self):
 		try:
@@ -147,25 +198,25 @@ def run():
 	parser = argparse.ArgumentParser()
 	parser.add_argument('filename', help="filename for view")
 	parser.add_argument("--delay", help="typing delay when showing", type=float)
-	parser.add_argument("--begin", help="begin for typing", type=int)
-	parser.add_argument("--end", help="end for typing", type=int)
+	parser.add_argument("--areas", help="areas to type, example: 10-20")
 	args = parser.parse_args()
 
 	filename = args.filename
 	delay = None
-	begin = None
-	end = None
+	areas = list()
 
 	if args.delay:
 		delay = args.delay
 
-	if args.begin:
-		begin = args.begin
+	if args.areas:
+		for area in args.areas.split(','):
+			data = area.split('-')
+			if len(data) > 1:
+				areas.append([int(data[0]), int(data[1])])
+			else:
+				areas.append([int(data[0])])
 
-	if args.end:
-		end = args.end
-
-	obj = DelayTyping(filename, delay=delay, begin=begin, end=end)
+	obj = DelayTyping(filename, delay=delay, areas=areas)
 	obj.show()
 
 
