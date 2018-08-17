@@ -69,19 +69,24 @@ class DelayTyping(object):
 	COLOR_HIGHLIGHT  = 2
 	COLOR_BACKGROUND = 3
 	
-	def __init__(self, filename, page=1, delay=None, areas=None):
+	def __init__(self, filename, start=1, delay=None, areas=None):
 		logging.info('Creating DelayTyping object.')
 		self.filename = filename
 		self.delay = delay
 		self.areas = list()
 		self.current_line = 1
 		self.lines = list()
-		self.line = page
+		self.start = start
+		self.adjust_start = 0
 
 		self.areas_processes(areas)
 
 		self.curses = MyCurses()
 		self.init_curses()
+
+	@property
+	def line(self):
+		return self.start - self.adjust_start
 	
 	def init_curses(self):
 		logging.info('Initializing curses enviroment.')
@@ -125,6 +130,16 @@ class DelayTyping(object):
 
 		return -1, 0
 
+	def __adjust_start(self, area):
+		adjust = 0
+
+		if len(area) == 3:
+			adjust = 1
+		else:
+			adjust = area[1] - area[0]
+
+		self.adjust_start = max((self.adjust_start - adjust), 0)
+
 	def areas_processes(self, areas):
 		logging.info('Processing areas for typing.')
 		aux = list()
@@ -135,8 +150,14 @@ class DelayTyping(object):
 		for area in areas[::-1]:
 			adjust = self.__calculate_adjusts(area[0])
 			if len(area) == 1:
+				if area[0] < self.start:
+					self.adjust_start += 1
 				self.areas.append([area[0], adjust, list()])
 			else:
+				if area[1] < self.start:
+					self.adjust_start += area[1] - area[0] + 1
+				elif area[0] < self.start:
+					self.adjust_start += self.start - area[0] + 1
 				self.areas.append([area[0], area[1], adjust, list()])
 
 		self.areas = self.areas[::-1]
@@ -150,15 +171,15 @@ class DelayTyping(object):
 			for line, data in enumerate(fd.readlines(), start=1):
 				if area_size > 0:
 					area_size -= 1
-					self.areas[area][-1].append(data)
+					self.areas[area][-1].append([self.COLOR_HIGHLIGHT, data])
 					continue
 
 				area, area_size = self.__in_areas(line)
 				if area >= 0:
 					area_size -= 1
-					self.areas[area][-1].append(data)
+					self.areas[area][-1].append([self.COLOR_HIGHLIGHT, data])
 				else:
-					self.lines.append(data)
+					self.lines.append([self.COLOR_NORMAL, data])
 
 	def view_content(self):
 		n = self.line - 1
@@ -171,47 +192,58 @@ class DelayTyping(object):
 			if printed >= term_height:
 				break
 
-			self.curses.write(text=self.lines[n], color=self.COLOR_NORMAL)
+			self.curses.write(text=self.lines[n][1], color=self.lines[n][0])
 			n += 1
 			printed += 1
 
 	def delayed_write(self, line, content):
-		logging.info('Writing {:4d}: {}'.format(line, content[:-1]))
+		logging.info('Writing {:4d}: {}'.format(line, content[1][:-1]))
 		locate = False
-		for character in content:
+		for character in content[1]:
 			if not locate:
 				self.curses.write(
 					text = character,
 					x = line - 1,
 					y = 0, 
-					color = self.COLOR_HIGHLIGHT, 
+					color = content[0], 
 					with_scroll = True
 				)
 				locate = True
 			else:
 				self.curses.write(
 					text = character,
-					color = self.COLOR_HIGHLIGHT
+					color = content[0]
 				)
 
 			if self.delay is not None:
 				sleep(self.delay)
 
-	def scroll(self, lines_to_scroll):
-		logging.info('It make a scroll text moviment for {} lines.'.format(lines_to_scroll))
-		signal = 1
+	def scroll(self, area):
+		logging.info('Making scroll moviment.')
 
-		if lines_to_scroll < 0:
-			signal = -1
+		lines_to_scroll = 0
+		step = 1
+		begin = area[0]
+		adjust = area[-2] + 1
+
+		if begin < self.line:
+			step = -1
+			lines_to_scroll = max((self.line - begin + adjust), 0)
+		elif begin > self.line:
+			lines_to_scroll = self.start - (begin + adjust)
+
+		logging.debug('Begin = {}, adjust = {}, start = {}, adjust_start = {}, scroll = {}'.format(begin, adjust, self.start, self.adjust_start, lines_to_scroll))
 
 		for x in range(abs(lines_to_scroll)):
-			self.line += signal
+			self.start += step
 			self.curses.clear()
 			self.curses.write_count(initial=self.line)
 			self.view_content()
 
 			if self.delay is not None:
 				sleep(0.1)
+
+		return lines_to_scroll
 
 	def view_file(self):
 		logging.info('View a file.')
@@ -227,31 +259,26 @@ class DelayTyping(object):
 				logging.info('Processing area {}-{}'.format(area[0], area[1]))
 			self.curses.pause()
 
-			begin = end = -1
-			adjust = 0
-			content = list()
+			begin = area[0]
+			end = len(area) == 3 and begin or area[1]
+			adjust = area[-2]
+			content = area[-1]
 
-			if len(area) == 3:
-				begin, adjust, content = area
-			else:
-				begin, end, adjust, content = area
-
-			n = begin
-
-			if n < self.line:
-				self.scroll(n - self.line - 1)
-				self.curses.pause()
-			elif n > self.line + height:
-				self.scroll(n - self.line + height)
-				self.curses.pause()
+			scrolled = self.scroll(area)
+			self.curses.pause()
 
 			for line in content:
-				x = n - self.line + 1
-
-				logging.debug('Calculating line: {} - {} + 1 = {}'.format(n, self.line, x))
-
+				x = begin - self.line - adjust + 1
 				self.delayed_write(x, line)
-				n += 1
+				begin += 1
+
+			logging.debug('Begin = {}, scrolled = {}, Start = {}, Line = {}'.format(begin, scrolled, self.start, self.line))
+			logging.debug(self.lines[self.line])
+			logging.debug(self.lines[self.line - 1])
+			self.lines = self.lines[:self.line] + content + self.lines[self.line:]
+			self.start -= end - begin  + adjust + 2
+
+			self.__adjust_start(area)
 
 		curses.beep()
 
@@ -269,18 +296,18 @@ class DelayTyping(object):
 def run():
 	parser = argparse.ArgumentParser()
 	parser.add_argument('filename', help="filename for view")
-	parser.add_argument("--page", help="initial page to show", type=int)	
+	parser.add_argument("--start", help="initial line to show", type=int)	
 	parser.add_argument("--delay", help="typing delay when showing", type=float)
 	parser.add_argument("--areas", help="areas to type, example: 10-20")
 	args = parser.parse_args()
 
 	filename = args.filename
 	delay = None
-	page = 1
+	start = 1
 	areas = list()
 
-	if args.page:
-		page = args.page
+	if args.start:
+		start = args.start
 
 	if args.delay:
 		delay = args.delay
@@ -293,7 +320,9 @@ def run():
 			else:
 				areas.append([int(data[0])])
 
-	obj = DelayTyping(filename, page=page, delay=delay, areas=areas)
+	logging.info('Stating with start={}, delay={}'.format(start, delay))
+
+	obj = DelayTyping(filename, start=start, delay=delay, areas=areas)
 	obj.show()
 
 
