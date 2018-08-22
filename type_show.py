@@ -64,6 +64,104 @@ class MyCurses(object):
 		curses.endwin()
 
 
+class FileLine(object):
+	LINE_NORMAL    = 1
+	LINE_HIGHLIGHT = 2
+
+	def __init__(self, data, property=LINE_NORMAL):
+		self.data = data
+		self.property = property
+		self.hided = False
+
+	def __str__(self):
+		return '{}[{}] {}'.format(self.hided and '-' or '+', self.get_property(), self.data)
+
+	def get_property(self):
+		if self.property == FileLine.LINE_HIGHLIGHT:
+			return 'Highlight'
+		return 'Normal'
+
+
+class HideArea(object):
+
+	def __init__(self, begin, end=None):
+		self.processed = False
+		self.begin = begin
+		self.end = end
+		self.content = list()
+
+	def __str__(self):
+		return 'Begin = {}; End = {}'.format(self.begin, self.end)
+
+	@property
+	def size(self):
+		size = self.end - self.begin + 1
+		if self.begin == self.end:
+			size = 1
+		return size
+
+
+class FileData(object):
+
+	def __init__(self, lines):
+		self.lenght = 0
+		self.content = list()
+		self.hided = list()
+
+		for line in lines:
+			self.lenght += 1
+			self.content.append(FileLine(data=line))
+
+	def __getattr__(self, method):	
+		return getattr(self.content, method)
+
+	def __len__(self):
+		return len(self.content)
+
+	def __getitem__(self, key):
+		return self.content[key]
+
+	def add_hide_area(self, begin, end=None):
+		if end is None:
+			end = begin
+
+		for x in range(begin -1, end):
+			self.content[x].hided = True
+			self.content[x].property = FileLine.LINE_HIGHLIGHT
+
+		hided_area = HideArea(begin=begin, end=end)
+		hided_area.content = self.content[begin - 1: end]
+
+		self.hided.append(hided_area)
+
+	def hide_areas(self):
+		for x in range(len(self.content)-1, -1, -1):
+			if self.content[x].hided:
+				del self.content[x]
+
+	def get_hided_data(self, area):
+		lines = list()
+		for x  in range(area.begin - 1, area.end):
+			lines.append(self.content[x])
+		return lines
+
+	def proccess_hided_area(self, area):
+		adjust = self.calculate_adjust(area.begin)
+		self.content = self.content[:area.begin-adjust] + area.content + self.content[area.begin-adjust:]
+		area.processed = True
+
+	def calculate_adjust(self, value):
+		adjust = 0
+		for area in self.hided:
+			if not area.processed:
+				if area.end <= value:
+					adjust += area.size
+				elif area.begin <= value:
+					adjust += value - area.begin
+				logging.debug('************* Value = {}, Begin = {}, End = {}, Adjust = {}'.format(value, area.begin, area.end, adjust))
+		return adjust + 1
+		
+
 class DelayTyping(object):
 	COLOR_NORMAL     = 1
 	COLOR_HIGHLIGHT  = 2
@@ -73,21 +171,29 @@ class DelayTyping(object):
 		logging.info('Creating DelayTyping object.')
 		self.filename = filename
 		self.delay = delay
-		self.areas = list()
-		self.current_line = 1
-		self.lines = list()
-		self.start = start
-		self.adjust_start = 0
+		self.file_data = None
+		self.line = start
 
-		self.areas_processes(areas)
+		with open(self.filename, 'r') as fd:
+			self.file_data = FileData(lines=fd.readlines())
+
+		for area in areas:
+			if len(area) == 1:
+				self.file_data.add_hide_area(begin=area[0], end=area[0])
+			else:
+				self.file_data.add_hide_area(begin=area[0], end=area[1])
+
+		self.file_data.hide_areas()
 
 		self.curses = MyCurses()
 		self.init_curses()
 
-	@property
-	def line(self):
-		return self.start - self.adjust_start
-	
+	def __get_color(self, type):
+		color = DelayTyping.COLOR_NORMAL
+		if type == FileLine.LINE_HIGHLIGHT:
+			color = DelayTyping.COLOR_HIGHLIGHT
+		return color
+
 	def init_curses(self):
 		logging.info('Initializing curses enviroment.')
 		self.curses.set_color_pair(
@@ -107,83 +213,9 @@ class DelayTyping(object):
 		)
 		self.curses.init_windows(self.COLOR_BACKGROUND)
 
-	def __calculate_adjusts(self, begin):
-		adjust = 0
-		for area in self.areas:
-			if len(area) == 3:
-				if begin > area[0]:
-					adjust += 1
-			else:
-				if begin > area[1]:
-					adjust += area[1] - area[0] + 1
-		return adjust
-
-	def __in_areas(self, line):
-		for idx, area in enumerate(self.areas):
-			l = len(area)
-
-			if l == 3 and area[0] == line:
-				return idx, 1
-
-			if l == 4 and area[0] <= line <= area[1]:
-				return idx, area[1] - area[0] + 1
-
-		return -1, 0
-
-	def __adjust_start(self, area):
-		adjust = 0
-
-		if len(area) == 3:
-			adjust = 1
-		else:
-			adjust = area[1] - area[0]
-
-		self.adjust_start = max((self.adjust_start - adjust), 0)
-
-	def areas_processes(self, areas):
-		logging.info('Processing areas for typing.')
-		aux = list()
-
-		self.areas = list()
-
-		logging.info('Calculating adjusts for areas size.')
-		for area in areas[::-1]:
-			adjust = self.__calculate_adjusts(area[0])
-			if len(area) == 1:
-				if area[0] < self.start:
-					self.adjust_start += 1
-				self.areas.append([area[0], adjust, list()])
-			else:
-				if area[1] < self.start:
-					self.adjust_start += area[1] - area[0] + 1
-				elif area[0] < self.start:
-					self.adjust_start += self.start - area[0] + 1
-				self.areas.append([area[0], area[1], adjust, list()])
-
-		self.areas = self.areas[::-1]
-
-	def prepare_file(self):
-		logging.info('Prepare file to type.')
-		logging.info('Prepare file content and area\'s data.')
-		area = -1
-		area_size = 0
-		with open(self.filename, 'r') as fd:
-			for line, data in enumerate(fd.readlines(), start=1):
-				if area_size > 0:
-					area_size -= 1
-					self.areas[area][-1].append([self.COLOR_HIGHLIGHT, data])
-					continue
-
-				area, area_size = self.__in_areas(line)
-				if area >= 0:
-					area_size -= 1
-					self.areas[area][-1].append([self.COLOR_HIGHLIGHT, data])
-				else:
-					self.lines.append([self.COLOR_NORMAL, data])
-
 	def view_content(self):
 		n = self.line - 1
-		max_lines = len(self.lines)
+		max_lines = len(self.file_data)
 		printed = 0
 
 		term_height = self.curses.height - 1
@@ -191,59 +223,64 @@ class DelayTyping(object):
 		while n < max_lines:
 			if printed >= term_height:
 				break
-
-			self.curses.write(text=self.lines[n][1], color=self.lines[n][0])
-			n += 1
+			data = self.file_data[n]
+			color = data.property == FileLine.LINE_NORMAL and DelayTyping.COLOR_NORMAL or DelayTyping.COLOR_HIGHLIGHT
+			self.curses.write(text=data.data, color=color)
 			printed += 1
+			n += 1
 
-	def delayed_write(self, line, content):
-		logging.info('Writing {:4d}: {}'.format(line, content[1][:-1]))
+	def delayed_write(self, area, adjust, count, content):
+		logging.info('Writing: {}'.format(content.data[:-1]))
+		logging.debug('Start = {}, Begin = {}, End = {}, Size = {}, Adjust = {}, Count = {}'.format(self.line, area.begin, area.end, area.size, adjust, count))
 		locate = False
-		for character in content[1]:
+		for character in content.data:
 			if not locate:
+				begin = area.begin - adjust - self.line + 1
+				logging.debug('START = {}; BEGIN == {}'.format(self.line,  begin))
+
 				self.curses.write(
 					text = character,
-					x = line - 1,
+					x = begin + count,
 					y = 0, 
-					color = content[0], 
+					color = self.__get_color(content.property), 
 					with_scroll = True
 				)
 				locate = True
 			else:
 				self.curses.write(
 					text = character,
-					color = content[0]
+					color = self.__get_color(content.property)
 				)
 
 			if self.delay is not None:
 				sleep(self.delay)
 
-	def scroll(self, area):
+	def scroll(self, area, adjust):
 		logging.info('Making scroll moviment.')
+		logging.debug('Line = {}, Height = {}, area.size = {}, area.begin = {}, adjust = {}'.format(self.line, self.curses.height, area.size, area.begin, adjust))
 
+		step = 0
 		lines_to_scroll = 0
-		step = 1
-		begin = area[0]
-		adjust = area[-2] + 1
 
-		if begin < self.line:
+		if self.line > area.begin:
+			logging.debug('Scroll IF - {}'.format(self.line - area.begin + adjust + area.size))
 			step = -1
-			lines_to_scroll = max((self.line - begin + adjust), 0)
-		elif begin > self.line:
-			lines_to_scroll = self.start - (begin + adjust)
+			lines_to_scroll = self.line - area.begin + adjust
+		elif (self.line + self.curses.height) < area.begin:
+			logging.debug('Scroll ELIF - {}'.format(area.begin - self.line - adjust))
+			step = 1
+			lines_to_scroll = area.begin - self.line - adjust
 
-		logging.debug('Begin = {}, adjust = {}, start = {}, adjust_start = {}, scroll = {}'.format(begin, adjust, self.start, self.adjust_start, lines_to_scroll))
+		logging.debug('Step = {}, Lines to Scroll = {}'.format(step, lines_to_scroll))
 
 		for x in range(abs(lines_to_scroll)):
-			self.start += step
+			self.line += step
 			self.curses.clear()
 			self.curses.write_count(initial=self.line)
 			self.view_content()
 
 			if self.delay is not None:
 				sleep(0.1)
-
-		return lines_to_scroll
 
 	def view_file(self):
 		logging.info('View a file.')
@@ -252,43 +289,29 @@ class DelayTyping(object):
 
 		height = self.curses.height
 
-		for area in self.areas:
-			if len(area) == 3:
-				logging.info('Processing area {}'.format(area[0]))
-			else:
-				logging.info('Processing area {}-{}'.format(area[0], area[1]))
+		for area in self.file_data.hided:
+			logging.debug(area)
 			self.curses.pause()
 
-			begin = area[0]
-			end = len(area) == 3 and begin or area[1]
-			adjust = area[-2]
-			content = area[-1]
-
-			scrolled = self.scroll(area)
+			adjust = self.file_data.calculate_adjust(area.begin - 1)
+			scrolled = self.scroll(area=area, adjust=adjust)
 			self.curses.pause()
 
-			for line in content:
-				x = begin - self.line - adjust + 1
-				self.delayed_write(x, line)
-				begin += 1
-
-			logging.debug('Begin = {}, scrolled = {}, Start = {}, Line = {}'.format(begin, scrolled, self.start, self.line))
-			logging.debug(self.lines[self.line])
-			logging.debug(self.lines[self.line - 1])
-			self.lines = self.lines[:self.line] + content + self.lines[self.line:]
-			self.start -= end - begin  + adjust + 2
-
-			self.__adjust_start(area)
+			count_line = 0
+			self.file_data.proccess_hided_area(area)
+			for line in area.content:
+				self.delayed_write(area=area, adjust=adjust, count=count_line, content=line)
+				line.hided = False
+				count_line += 1
 
 		curses.beep()
 
 	def show(self):
 		try:
-			self.prepare_file()
 			self.view_file()
 			self.curses.pause()
 		except Exception as e:
-			logging.error(e)
+			logging.exception("Traceback")
 		finally: 
 			self.curses.finalize()
 
